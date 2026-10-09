@@ -72,7 +72,7 @@
 - [x] Тулчейн: форк закреплён на 1.97.1 (`rust-toolchain.toml`), но как зависимость собирается браузерным `stable` (rustc 1.97.1 на этой машине) — предупреждения о невыполненных `#[expect]` есть, ошибок нет
 - [x] Патч `0001-websocket-via-proxy` перенесён в ветку форка отдельным коммитом (`a3ac40eda8`); легаси-файл `patches/servo/` остаётся для режима без форка
 - [x] Проверено: `cargo build -p nrb --features servo` на форке — 3 мин (debug, чистый `target-fork`); `scripts/gui-smoke.sh` зелёный; корпус на бинаре из форка 43/52 (82,7%) против 44/52 на крейтах crates.io (в пределах шума ±4%); WebSocket через `--hermetic` работает (патч действует)
-- [ ] Тесты встраивания форка (`cargo test -p servo`: `components/servo/tests/*`) — сборка идёт; зафиксировать, что проходит «как есть»
+- [x] Тесты встраивания форка: **101/101** проходят под `cargo nextest run -p servo` (процесс на тест; обычный `cargo test` падает на «Already initialized: Opts» — глобальные настройки Servo одноразовые); с правками N1/N2 включительно. Запуск: `scripts/lowload.sh cargo nextest run -p servo --test-threads 2` из репозитория браузера (≈45 с после сборки)
 - [ ] Скрипт `nrxp-servo-sync.sh` (`git format-patch v0.7.0..nrxp/0.7` → `patches/servo/`) — отложен: после N2 легаси-режим станет не нужен
 **Приёмка** — достигнута: `git diff v0.7.0..nrxp/0.7` в `components/` = только перенесённый патч WebSocket; браузер собирается и проходит смоук/корпус на коде форка.
 **Риски** — несовпадение транзитивных версий (не проявилось); долгая первая сборка (~10 ГБ, `target-fork`).
@@ -127,7 +127,7 @@ ServoBuilder::network_connector(Arc<dyn NetworkConnector>)
 * `servo::ServoBuilder::network_connector(...)` + реэкспорт `servo::{NetworkConnector, NetworkStream, ConnectFuture}`
 * Тест встраивания `components/servo/tests/network_connector.rs`: документ `http://page.nrxp-test.invalid:8080/` и скрипт с `sub.nrxp-test.invalid:8081` загружаются **только** через
   коннектор, который отдаёт им локальный сервер; проверяется, что имена пришли нерезолвленными с портами из URL
-* Тесты: тест проходит; полный `nextest` по `-p servo` (100 тестов) проходил до этой правки — повторный полный прогон обрывался вместе с сессией (перегрузка машины); перезапустить порциями
+* Тесты: полный `nextest` по `-p servo` — 101/101 (включая тест коннектора), прогон под лимитами ресурсов
 * В браузере: `TransportConnector` → `NrxpTransport`; проверено на 12 сайтах, WebSocket, герметичном режиме, GUI-сценариях; сокетов самого движка нет (leakwatch по pid: 0)
 **Не сделано (остаток):** `UdpSocket`/WebRTC/QUIC через тот же интерфейс (N9/N10); DNS-over-коннектор для не-HTTP путей (их в `components/` нет — проверено `git grep`); поведение при `multiprocess` (N12);
 DevTools/webdriver-слушатели остаются локальными и вне объёма; проверить `components/net/tests` (тесты `net` собирают клиент без коннектора — поведение не менялось).
