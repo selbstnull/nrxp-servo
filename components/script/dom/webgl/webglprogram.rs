@@ -266,7 +266,10 @@ impl WebGLProgram {
     }
 
     fn detach_shaders(&self) {
-        assert!(self.is_deleted());
+        // Same finalization-order hazard as `WebGLBuffer::delete`: do not abort the process, just skip.
+        if !self.is_deleted() {
+            return;
+        }
         self.droppable.borrow_mut().detach_shaders();
         if self.fragment_shader.get().is_some() {
             self.fragment_shader.set(None);

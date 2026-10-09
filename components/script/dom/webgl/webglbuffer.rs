@@ -82,7 +82,13 @@ impl DroppableWebGLBuffer {
     }
 
     pub(crate) fn delete(&self, operation_fallibility: Operation) {
-        assert!(self.is_deleted());
+        // This used to be `assert!(self.is_deleted())`. During garbage collection a `VertexArrayObject` finalizer can run
+        // `decrement_attached_counter` on a buffer that was finalized in the same collection (finalization order is
+        // undefined), and the assertion then aborted the whole process at shutdown (observed on github.com in release
+        // builds: "assertion failed: self.is_deleted()"). Not being deleted yet means there is nothing to send.
+        if !self.is_deleted() {
+            return;
+        }
         if let Some(context) = self.context.root() {
             let cmd = WebGLCommand::DeleteBuffer(self.id);
             match operation_fallibility {
