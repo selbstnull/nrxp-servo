@@ -37,6 +37,105 @@ use crate::hosts::replace_host;
 
 pub const BUF_SIZE: usize = 32768;
 
+/// A bidirectional byte stream handed to the network stack by an embedder-provided [`NetworkConnector`].
+/// Any tokio `AsyncRead + AsyncWrite` type qualifies.
+pub trait NetworkStream:
+    tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static
+{
+}
+impl<T> NetworkStream for T where
+    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static
+{
+}
+
+pub type ConnectFuture =
+    std::pin::Pin<Box<dyn Future<Output = io::Result<Box<dyn NetworkStream>>> + Send>>;
+
+/// Embedder hook for **all** outgoing TCP connections of the network stack (HTTP(S) requests and WebSockets).
+///
+/// When installed (see [`set_network_connector`]), Servo never opens a socket itself: it asks the connector for a stream to
+/// `host:port`. `host` is passed **unresolved** (a name or an IP literal, without brackets for IPv6), so the connector
+/// decides how and where the name is resolved — for example on the far end of a tunnel. TLS is still performed by Servo on
+/// top of the returned stream. The `network_*_proxy_uri` preferences are ignored while a connector is installed.
+pub trait NetworkConnector: Send + Sync + 'static {
+    fn connect(&self, host: &str, port: u16) -> ConnectFuture;
+}
+
+static NETWORK_CONNECTOR: parking_lot::RwLock<Option<Arc<dyn NetworkConnector>>> =
+    parking_lot::RwLock::new(None);
+
+/// Installs (or, with `None`, removes) the process-wide connector. Must be called before the network stack starts
+/// making requests; `ServoBuilder::network_connector` does this.
+pub fn set_network_connector(connector: Option<Arc<dyn NetworkConnector>>) {
+    *NETWORK_CONNECTOR.write() = connector;
+}
+
+pub fn network_connector() -> Option<Arc<dyn NetworkConnector>> {
+    NETWORK_CONNECTOR.read().clone()
+}
+
+/// The stream type the HTTP client works with: either a direct/proxied TCP connection or whatever the embedder's
+/// [`NetworkConnector`] returned.
+pub struct ServoStream(TokioIo<Box<dyn NetworkStream>>);
+
+impl ServoStream {
+    pub fn new(stream: Box<dyn NetworkStream>) -> Self {
+        Self(TokioIo::new(stream))
+    }
+}
+
+impl Connection for ServoStream {
+    fn connected(&self) -> Connected {
+        Connected::new()
+    }
+}
+
+impl hyper::rt::Read for ServoStream {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: hyper::rt::ReadBufCursor<'_>,
+    ) -> Poll<Result<(), io::Error>> {
+        std::pin::Pin::new(&mut self.get_mut().0).poll_read(cx, buf)
+    }
+}
+
+impl hyper::rt::Write for ServoStream {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<Result<usize, io::Error>> {
+        std::pin::Pin::new(&mut self.get_mut().0).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), io::Error>> {
+        std::pin::Pin::new(&mut self.get_mut().0).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), io::Error>> {
+        std::pin::Pin::new(&mut self.get_mut().0).poll_shutdown(cx)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.0.is_write_vectored()
+    }
+
+    fn poll_write_vectored(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<Result<usize, io::Error>> {
+        std::pin::Pin::new(&mut self.get_mut().0).poll_write_vectored(cx, bufs)
+    }
+}
+
 /// ALPN identifier for HTTP/2 (RFC 7540 §3.1).
 pub const ALPN_H2: &str = "h2";
 
@@ -614,10 +713,10 @@ impl ProxyConnector {
 
 // Just forward everything to the inner type except that we modify the errors returned.
 impl Service<Destination> for ProxyConnector {
-    type Response = TokioIo<TcpStream>;
+    type Response = ServoStream;
     type Error = ConnectionError;
     type Future =
-        std::pin::Pin<Box<dyn Future<Output = Result<TokioIo<TcpStream>, ConnectionError>> + Send>>;
+        std::pin::Pin<Box<dyn Future<Output = Result<ServoStream, ConnectionError>> + Send>>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         self.client
@@ -626,6 +725,32 @@ impl Service<Destination> for ProxyConnector {
     }
 
     fn call(&mut self, req: Destination) -> Self::Future {
+        // An embedder-provided connector replaces both direct and proxied connections.
+        if let Some(connector) = network_connector() {
+            let host = req
+                .host()
+                .unwrap_or_default()
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .to_owned();
+            let port = req
+                .port_u16()
+                .unwrap_or(if req.scheme_str() == Some("https") {
+                    443
+                } else {
+                    80
+                });
+            return Box::pin(async move {
+                connector
+                    .connect(&host, port)
+                    .await
+                    .map(ServoStream::new)
+                    .map_err(|e| ConnectionError::HttpError(format!("{e}")))
+            });
+        }
+        let into_stream = |io: TokioIo<TcpStream>| {
+            ServoStream::new(Box::new(io.into_inner()) as Box<dyn NetworkStream>)
+        };
         match self.matcher.intercept(&req) {
             Some(intercept) => {
                 let mut tunnel = Tunnel::new(intercept.uri().clone(), self.client.clone());
@@ -635,12 +760,14 @@ impl Service<Destination> for ProxyConnector {
                     tunnel
                 }
                 .call(req)
+                .map_ok(into_stream)
                 .map_err(|e| ConnectionError::ProxyError(format!("{e}")));
                 Box::pin(final_tunnel)
             },
             None => Box::pin(
                 self.client
                     .call(req)
+                    .map_ok(into_stream)
                     .map_err(|e| ConnectionError::ProxyError(format!("{e}"))),
             ),
         }

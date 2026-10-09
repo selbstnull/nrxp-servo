@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_tungstenite::WebSocketStream;
-use async_tungstenite::tokio::{ConnectStream, client_async_tls_with_connector_and_config};
+use async_tungstenite::tokio::{ClientStream, client_async_tls_with_connector_and_config};
 use futures::stream::StreamExt;
 use headers::{
     Authorization, Connection, HeaderMapExt, SecWebsocketKey, SecWebsocketVersion, Upgrade,
@@ -38,7 +38,7 @@ use tungstenite::protocol::CloseFrame;
 use tungstenite::{ClientRequestBuilder, Message};
 
 use crate::async_runtime::spawn_task;
-use crate::connector::TlsConfig;
+use crate::connector::{NetworkStream, TlsConfig, network_connector};
 use crate::cookie::ServoCookie;
 use crate::hosts::replace_host;
 use crate::http_loader::HttpState;
@@ -145,8 +145,8 @@ fn process_ws_response(
         if !ServoCookie::is_valid_name_or_value(cookie_bytes) {
             continue;
         }
-        if let Ok(s) = std::str::from_utf8(cookie_bytes) &&
-            let Some(cookie) =
+        if let Ok(s) = std::str::from_utf8(cookie_bytes)
+            && let Some(cookie) =
                 ServoCookie::from_cookie_string(s, resource_url, CookieSource::HTTP)
         {
             jar.push(cookie, resource_url, CookieSource::HTTP);
@@ -211,7 +211,7 @@ fn setup_dom_listener(
 async fn run_ws_loop(
     mut dom_receiver: UnboundedReceiver<DomMsg>,
     resource_event_sender: ProfileGenericCallback<WebSocketNetworkEvent>,
-    mut stream: WebSocketStream<ConnectStream>,
+    mut stream: WebSocketStream<ClientStream<Box<dyn NetworkStream>>>,
 ) {
     loop {
         select! {
@@ -301,7 +301,15 @@ async fn run_ws_loop(
 
 /// TCP-соединение до `host:port`: напрямую либо через HTTP-CONNECT прокси из prefs
 /// (`network_https_proxy_uri`, иначе `network_http_proxy_uri`). Имя хоста уходит прокси как есть.
-async fn connect_tcp(host: &str, port: u16) -> std::io::Result<TcpStream> {
+async fn connect_tcp(host: &str, port: u16) -> std::io::Result<Box<dyn NetworkStream>> {
+    // An embedder-provided connector (see `connector::NetworkConnector`) takes precedence over everything below.
+    if let Some(connector) = network_connector() {
+        return connector.connect(host, port).await;
+    }
+    Ok(Box::new(connect_tcp_direct(host, port).await?))
+}
+
+async fn connect_tcp_direct(host: &str, port: u16) -> std::io::Result<TcpStream> {
     use std::io::{Error as IoError, ErrorKind};
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -318,8 +326,12 @@ async fn connect_tcp(host: &str, port: u16) -> std::io::Result<TcpStream> {
         return TcpStream::connect((host, port)).await;
     }
 
-    let proxy = url::Url::parse(&proxy_uri)
-        .map_err(|e| IoError::new(ErrorKind::InvalidInput, format!("некорректный proxy uri: {e}")))?;
+    let proxy = url::Url::parse(&proxy_uri).map_err(|e| {
+        IoError::new(
+            ErrorKind::InvalidInput,
+            format!("некорректный proxy uri: {e}"),
+        )
+    })?;
     let proxy_host = proxy
         .host_str()
         .ok_or_else(|| IoError::new(ErrorKind::InvalidInput, "в proxy uri нет хоста"))?;
@@ -350,10 +362,16 @@ async fn connect_tcp(host: &str, port: u16) -> std::io::Result<TcpStream> {
     let mut byte = [0u8; 1];
     while !head.ends_with(b"\r\n\r\n") {
         if head.len() > 16 * 1024 {
-            return Err(IoError::new(ErrorKind::InvalidData, "слишком длинный ответ прокси"));
+            return Err(IoError::new(
+                ErrorKind::InvalidData,
+                "слишком длинный ответ прокси",
+            ));
         }
         if stream.read(&mut byte).await? == 0 {
-            return Err(IoError::new(ErrorKind::UnexpectedEof, "прокси закрыл соединение"));
+            return Err(IoError::new(
+                ErrorKind::UnexpectedEof,
+                "прокси закрыл соединение",
+            ));
         }
         head.push(byte[0]);
     }

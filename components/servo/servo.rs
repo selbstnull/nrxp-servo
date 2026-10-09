@@ -1450,6 +1450,7 @@ pub struct ServoBuilder {
     preferences: Option<Box<Preferences>>,
     event_loop_waker: Box<dyn EventLoopWaker>,
     protocol_registry: ProtocolRegistry,
+    network_connector: Option<Arc<dyn net::connector::NetworkConnector>>,
 }
 
 impl Default for ServoBuilder {
@@ -1459,13 +1460,26 @@ impl Default for ServoBuilder {
             preferences: Default::default(),
             event_loop_waker: Box::new(DefaultEventLoopWaker),
             protocol_registry: Default::default(),
+            network_connector: None,
         }
     }
 }
 
 impl ServoBuilder {
     pub fn build(self) -> Servo {
+        // The connector is process-wide (like preferences): install it before the network stack starts.
+        net::connector::set_network_connector(self.network_connector.clone());
         Servo::new(self)
+    }
+
+    /// Routes **all** outgoing TCP connections (HTTP(S), WebSocket) through `connector` instead of Servo opening sockets itself.
+    /// Host names are passed unresolved. See [`net::connector::NetworkConnector`].
+    pub fn network_connector(
+        mut self,
+        connector: Arc<dyn net::connector::NetworkConnector>,
+    ) -> Self {
+        self.network_connector = Some(connector);
+        self
     }
 
     pub fn opts(mut self, opts: Opts) -> Self {
