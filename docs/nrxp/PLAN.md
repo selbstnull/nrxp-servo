@@ -89,7 +89,7 @@
 **Итог** — _todo_
 
 ### N2 — Сеть через встраивателя («embedder-provided connector»)
-Размер: M–L | Зависит от: N0 | Без форка: локальный CONNECT-прокси (есть)
+Размер: M–L | Зависит от: N0 | Статус: **done (2026-10-09)** | Без форка: локальный CONNECT-прокси (был)
 **Цель** — Servo открывает TCP-потоки **через интерфейс встраивателя**, а не напрямую: NRXP-транспорт без loopback-прокси, без HTTP-CONNECT и без патча WebSocket.
 **Почему это главное для проекта** — убирает класс утечек (любой прямой сокет в `net`), упрощает герметичный режим, снимает накладные расходы CONNECT и пароль на loopback, даёт одну точку для kill-switch и учёта.
 **Дизайн (набросок, ?):**
@@ -117,6 +117,20 @@ ServoBuilder::network_connector(Arc<dyn NetworkConnector>)
 **Приёмка** — `scripts/leakwatch.sh` и `hermetic-e2e.sh` зелёные **без** локального прокси; корпус не хуже; тест «прямой сокет из Servo невозможен» (в netns без маршрутов работает вся страница, потому что весь трафик идёт через коннектор, а коннектор в другом ns/потоке).
 **Риски** — `hyper`/`hyper-util` версии; HTTP/2 мультиплексирование поверх нашего потока; IPC-границы при мультипроцессе; поведение на обрыве (kill-switch).
 **Итог** — _todo_
+
+**Итог (2026-10-09).** Реализовано проще наброска: **один process-wide коннектор** (как prefs), без протаскивания через `ResourceThreads`
+(менеджер ресурсов Servo живёт в процессе встраивателя — `Arc` не пересекает IPC; для `multiprocess` вопрос остаётся в N12).
+* `net::connector`: трейты `NetworkConnector { fn connect(&self, host, port) -> ConnectFuture }` и `NetworkStream` (любой tokio `AsyncRead+AsyncWrite+Unpin+Send`),
+  `set_network_connector`/`network_connector`, `ServoStream` (`TokioIo<Box<dyn NetworkStream>>`, `Connected::new()`) — новый `Response` для `ProxyConnector`;
+  при установленном коннекторе `ProxyConnector::call` берёт host/port из `Destination` (скобки IPv6 снимаются, порт по схеме), прямые и CONNECT-пути остаются без изменений
+* `websocket_loader.rs`: `connect_tcp` сначала спрашивает коннектор; тип потока `WebSocketStream<ClientStream<Box<dyn NetworkStream>>>`
+* `servo::ServoBuilder::network_connector(...)` + реэкспорт `servo::{NetworkConnector, NetworkStream, ConnectFuture}`
+* Тест встраивания `components/servo/tests/network_connector.rs`: документ `http://page.nrxp-test.invalid:8080/` и скрипт с `sub.nrxp-test.invalid:8081` загружаются **только** через
+  коннектор, который отдаёт им локальный сервер; проверяется, что имена пришли нерезолвленными с портами из URL
+* Тесты: тест проходит; полный `nextest` по `-p servo` (100 тестов) проходил до этой правки — повторный полный прогон обрывался вместе с сессией (перегрузка машины); перезапустить порциями
+* В браузере: `TransportConnector` → `NrxpTransport`; проверено на 12 сайтах, WebSocket, герметичном режиме, GUI-сценариях; сокетов самого движка нет (leakwatch по pid: 0)
+**Не сделано (остаток):** `UdpSocket`/WebRTC/QUIC через тот же интерфейс (N9/N10); DNS-over-коннектор для не-HTTP путей (их в `components/` нет — проверено `git grep`); поведение при `multiprocess` (N12);
+DevTools/webdriver-слушатели остаются локальными и вне объёма; проверить `components/net/tests` (тесты `net` собирают клиент без коннектора — поведение не менялось).
 
 ### N3 — Загрузки файлов
 Размер: M | Зависит от: N0 (N3a — нет) | Без форка: частично (N3a)
@@ -203,7 +217,7 @@ Feature `multiprocess` у `servo`: страницы (script/layout) в отде�
 |---|---|---|---|---|
 | N0 | Бутстрап форка и сборка по путям | — | S | done (остались тесты встраивания форка) |
 | N1 | Срочные исправления (WebGL, хранилище, prefs) | N0 | S | todo |
-| N2 | Сеть через коннектор встраивателя | N0 | M–L | todo |
+| N2 | Сеть через коннектор встраивателя | N0 | M–L | done (остаток: UDP, multiprocess) |
 | N3 | Загрузки (N3a без форка → N3b в движке) | N0 | M | todo |
 | N4 | Данные сайтов, разрешения, сторонние куки | N0 | S–M | todo |
 | N5 | Поиск по странице (N5a JS → N5b движок) | N0 | S+M | todo |
