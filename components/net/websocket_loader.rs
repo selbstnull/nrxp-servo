@@ -299,6 +299,82 @@ async fn run_ws_loop(
     }
 }
 
+/// TCP-соединение до `host:port`: напрямую либо через HTTP-CONNECT прокси из prefs
+/// (`network_https_proxy_uri`, иначе `network_http_proxy_uri`). Имя хоста уходит прокси как есть.
+async fn connect_tcp(host: &str, port: u16) -> std::io::Result<TcpStream> {
+    use std::io::{Error as IoError, ErrorKind};
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let proxy_uri = {
+        let https = servo_config::pref!(network_https_proxy_uri);
+        if https.is_empty() {
+            servo_config::pref!(network_http_proxy_uri)
+        } else {
+            https
+        }
+    };
+    if proxy_uri.is_empty() {
+        return TcpStream::connect((host, port)).await;
+    }
+
+    let proxy = url::Url::parse(&proxy_uri)
+        .map_err(|e| IoError::new(ErrorKind::InvalidInput, format!("некорректный proxy uri: {e}")))?;
+    let proxy_host = proxy
+        .host_str()
+        .ok_or_else(|| IoError::new(ErrorKind::InvalidInput, "в proxy uri нет хоста"))?;
+    let proxy_port = proxy.port_or_known_default().unwrap_or(80);
+    let mut stream = TcpStream::connect((proxy_host, proxy_port)).await?;
+
+    let authority = if host.contains(':') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    };
+    let mut request = format!("CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n");
+    if !proxy.username().is_empty() {
+        use base64::Engine as _;
+        let credentials = format!(
+            "{}:{}",
+            percent_decode(proxy.username()),
+            percent_decode(proxy.password().unwrap_or(""))
+        );
+        let encoded = base64::engine::general_purpose::STANDARD.encode(credentials);
+        request.push_str(&format!("Proxy-Authorization: Basic {encoded}\r\n"));
+    }
+    request.push_str("\r\n");
+    stream.write_all(request.as_bytes()).await?;
+
+    // Читаем ответ побайтно до пустой строки, чтобы не съесть данные туннеля после заголовков.
+    let mut head = Vec::with_capacity(128);
+    let mut byte = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") {
+        if head.len() > 16 * 1024 {
+            return Err(IoError::new(ErrorKind::InvalidData, "слишком длинный ответ прокси"));
+        }
+        if stream.read(&mut byte).await? == 0 {
+            return Err(IoError::new(ErrorKind::UnexpectedEof, "прокси закрыл соединение"));
+        }
+        head.push(byte[0]);
+    }
+    let status_line = String::from_utf8_lossy(&head);
+    let status_line = status_line.lines().next().unwrap_or("");
+    if status_line.split_whitespace().nth(1) != Some("200") {
+        return Err(IoError::new(
+            ErrorKind::ConnectionRefused,
+            format!("прокси отказал в CONNECT: {status_line}"),
+        ));
+    }
+    Ok(stream)
+}
+
+fn percent_decode(input: &str) -> String {
+    url::form_urlencoded::parse(format!("k={input}").as_bytes())
+        .next()
+        .map(|(_, value)| value.into_owned())
+        .unwrap_or_default()
+}
+
 /// Initiate a new async WS connection. Returns an error if the connection fails
 /// for any reason, or if the response isn't valid. Otherwise, the endless WS
 /// listening loop will be started.
@@ -329,8 +405,11 @@ pub(crate) async fn start_websocket(
         .port_or_known_default()
         .ok_or_else(|| Error::Url(UrlError::UnableToConnect("Unknown port".into())))?;
 
-    let try_socket = TcpStream::connect((&*domain.to_string(), port)).await;
-    let socket = try_socket.map_err(Error::Io)?;
+    // nrb patch: WebSocket ходит через настроенный HTTP-CONNECT прокси (как остальной сетевой стек Servo), а не напрямую.
+    // Без этого WebSocket обходил прокси и локально резолвил DNS — утечка реального IP при работе через туннель.
+    let socket = connect_tcp(&domain.to_string(), port)
+        .await
+        .map_err(Error::Io)?;
     let connector = TlsConnector::from(Arc::new(tls_config));
 
     // TODO(pylbrecht): move request conversion to a separate function
