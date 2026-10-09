@@ -68,12 +68,12 @@ impl SqliteEngine {
         })
     }
 
-    fn memory() -> rusqlite::Result<Self> {
+    fn memory(base_dir: PathBuf) -> rusqlite::Result<Self> {
         let connection = Connection::open_in_memory()?;
         Self::init(&connection)?;
         Ok(SqliteEngine {
             connection,
-            base_dir: PathBuf::new(),
+            base_dir,
         })
     }
 
@@ -693,11 +693,15 @@ impl ClientStorageThreadFactory for ClientStorageThreadHandle {
         thread::Builder::new()
             .name("ClientStorageThread".to_owned())
             .spawn(move || {
-                // Keep temp_dir alive while the thread runs.
-                let _ = temp_dir;
-                let engine = SqliteEngine::new(storage_dir).unwrap_or_else(|error| {
+                // Keep temp_dir alive while the thread runs. (`let _ = temp_dir;` would NOT capture the variable, so the
+                // directory was dropped — and deleted — right after `new()` returned, and the engine below then failed
+                // to open its database.)
+                let _keep_temp_dir = temp_dir;
+                let engine = SqliteEngine::new(storage_dir.clone()).unwrap_or_else(|error| {
                     warn!("Failed to initialize ClientStorage engine into storage dir: {error:?}");
-                    SqliteEngine::memory().unwrap()
+                    // The database lives in memory, but per-database directories are still derived from `base_dir`:
+                    // keep them under the (intended) storage dir instead of a path relative to the working directory.
+                    SqliteEngine::memory(storage_dir).unwrap()
                 });
                 ClientStorageThread::new(sender_clone, generic_receiver, engine).start();
             })
