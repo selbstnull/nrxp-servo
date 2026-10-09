@@ -45,7 +45,7 @@
 | Service Workers | код есть (`components/script/dom/serviceworker*`), настройка `dom_serviceworker_enabled` выключена | не включаем |
 | WebRTC | `components/media/webrtc`, настройка `dom_webrtc_enabled` выключена; сокеты — внутри `webrtc`, встраиватель их не контролирует | выключено |
 | IntersectionObserver, adoptedStyleSheets, события композиции | настройки есть, **выключены по умолчанию** (`components/config/prefs.rs`: `dom_intersection_observer_enabled` и др.) | включаем в `build_preferences` (нужно react.dev, svelte.dev, GitHub) |
-| PerformanceObserver | `observe()` отвечает «No valid entry type» на большинство типов (`components/script/dom/performance/performanceobserver.rs:159`) | предупреждение в консоли, на работу не влияет |
+| PerformanceObserver | **поправка:** реализован по спецификации — `observe()` на неподдерживаемый тип только пишет предупреждение «No valid entry type» (`performanceobserver.rs:159`), `supportedEntryTypes` есть; это не дефект. Не хватает отдельных типов записей (`longtask`, `layout-shift`, `event`, `first-input`) — добавлять только если какой-то сайт на них ломается | предупреждение в консоли, на работу не влияет |
 | Остановка процесса | **падение при завершении**: `components/script/dom/webgl/webglbuffer.rs:85` и `webglprogram.rs:269` — `assert!(self.is_deleted())` в `delete()`, вызываемом при разборе контекста WebGL (на GitHub) → abort/SIGSEGV после готового результата | выход через `_exit`, `ManuallyDrop` |
 | Хранилище без профиля | `components/storage/client_storage.rs:697` — `let _ = temp_dir;` **не удерживает** временный каталог; тот удаляется сразу, хранилище откатывается на базу в памяти с относительными путями (`./bottles/…`) | свой временный каталог |
 | Диалоги/элементы управления | есть `EmbedderControl`: `SelectElement`, `ColorPicker`, `FilePicker`, `InputMethod`, `ContextMenu` (`components/shared/embedder/embedder_controls.rs`); есть `request_permission`, `request_authentication`, `show_notification`, `show_console_message`, `request_protocol_handler`, `notify_accessibility_tree_update` | реализованы в оболочке |
@@ -84,7 +84,7 @@
 - [ ] **WebGL при остановке:** `webglbuffer.rs:85`, `webglprogram.rs:269` — `delete()` не должен паниковать, если объект ещё не помечен на удаление (как уже сделано в `webglframebuffer.rs:127`: `if !self.is_deleted() { set_deleted… }`). Найти вызывающих при разборе контекста (`webglrenderingcontext.rs` Drop/очистка), добавить регрессионный тест (создать буфер, закрыть вкладку/движок — без паники). Проверить `main`: исправлено ли там
 - [ ] **Хранилище без профиля:** `client_storage.rs:697` — реально удерживать `TempDir` (`let _keep = temp_dir;`), а откат на память делать с абсолютным/временным `base_dir`, не `PathBuf::new()`
 - [ ] **Включить по умолчанию** (в `prefs.rs`) `dom_intersection_observer_enabled`, `dom_adoptedstylesheet_enabled`, `dom_composition_event_enabled` — отдельным обсуждаемым PR (метрики: react.dev, svelte.dev, GitHub падали без них); либо оставить за настройкой в браузере
-- [ ] **PerformanceObserver:** минимум `supportedEntryTypes` и приём типов `navigation`, `resource`, `paint`, `mark`, `measure` без исключений (много сайтов зовут `observe({type:…})`)
+- [~] **PerformanceObserver:** пункт снят — предупреждение в консоли соответствует спецификации (см. §1); новые типы записей — только по реальной поломке сайта
 **Приёмка** — в браузере удаляются `_exit`/`ManuallyDrop`-обход и `ephemeral_dir()`; release-корпус не хуже 88,5% (46/52); `nrb snap` на GitHub завершается кодом 0 без обхода.
 **Итог** — _todo_
 
@@ -202,7 +202,7 @@ Feature `multiprocess` у `servo`: страницы (script/layout) в отде�
 | Этап | Название | Зависит | Размер | Статус |
 |---|---|---|---|---|
 | N0 | Бутстрап форка и сборка по путям | — | S | done (остались тесты встраивания форка) |
-| N1 | Срочные исправления (WebGL, хранилище, prefs, PerformanceObserver) | N0 | S | todo |
+| N1 | Срочные исправления (WebGL, хранилище, prefs) | N0 | S | todo |
 | N2 | Сеть через коннектор встраивателя | N0 | M–L | todo |
 | N3 | Загрузки (N3a без форка → N3b в движке) | N0 | M | todo |
 | N4 | Данные сайтов, разрешения, сторонние куки | N0 | S–M | todo |
