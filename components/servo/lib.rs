@@ -70,6 +70,10 @@ pub use media::{
     GlApi as MediaGlApi, GlContext as MediaGlContext, NativeDisplay as MediaNativeDisplay,
 };
 pub use net::connector::{ConnectFuture, NetworkConnector, NetworkStream};
+#[cfg(feature = "media-gstreamer")]
+pub use servo_media_gstreamer::webrtc::{
+    WebRtcNetworkPolicy, set_network_policy as set_webrtc_network_policy,
+};
 pub use net::download::DownloadEvent;
 pub use net::image_cache::should_panic_hook_suppress_termination;
 pub use net_traits::CookieSource;

@@ -44,6 +44,9 @@ impl WebRtcController {
             .sender
             .send(RtcThreadEvent::ConfigureStun(stun_server, policy));
     }
+    pub fn configure_ice_servers(&self, servers: Vec<crate::IceServer>) {
+        let _ = self.sender.send(RtcThreadEvent::ConfigureIceServers(servers));
+    }
     pub fn set_remote_description(
         &self,
         desc: SessionDescription,
@@ -102,6 +105,7 @@ impl WebRtcController {
 
 pub enum RtcThreadEvent {
     ConfigureStun(String, BundlePolicy),
+    ConfigureIceServers(Vec<crate::IceServer>),
     SetRemoteDescription(SessionDescription, Box<dyn FnOnce() + Send + 'static>),
     SetLocalDescription(SessionDescription, Box<dyn FnOnce() + Send + 'static>),
     AddIceCandidate(IceCandidate),
@@ -142,6 +146,7 @@ pub fn handle_rtc_event(
 ) -> bool {
     let result = match event {
         RtcThreadEvent::ConfigureStun(server, policy) => controller.configure(&server, policy),
+        RtcThreadEvent::ConfigureIceServers(servers) => controller.configure_ice_servers(servers),
         RtcThreadEvent::SetRemoteDescription(desc, cb) => {
             controller.set_remote_description(desc, cb)
         },

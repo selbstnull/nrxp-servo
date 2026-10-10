@@ -34,10 +34,23 @@ impl<T: Display> From<T> for WebRtcError {
     }
 }
 
+/// One entry of `RTCConfiguration.iceServers` (nrxp-servo N9).
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct IceServer {
+    pub urls: Vec<String>,
+    pub username: Option<String>,
+    pub credential: Option<String>,
+}
+
 /// This trait is implemented by backends and should never be used directly by
 /// the client. Use WebRtcController instead
 pub trait WebRtcControllerBackend: Send {
     fn configure(&mut self, stun_server: &str, policy: BundlePolicy) -> WebRtcResult;
+    /// All ICE servers of the configuration, with credentials (TURN needs them). Backends that do not support
+    /// this ignore it.
+    fn configure_ice_servers(&mut self, _servers: Vec<IceServer>) -> WebRtcResult {
+        Ok(())
+    }
     fn set_remote_description(
         &mut self,
         _: SessionDescription,

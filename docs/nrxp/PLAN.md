@@ -191,6 +191,7 @@ DevTools/webdriver-слушатели остаются локальными и �
 **Цель** — WebRTC без утечки реального IP: все UDP-сокеты (ICE) создаёт встраиватель; режим `relay-only` (только TURN/NRXP UDP), host-кандидаты не раскрываются.
 **Задачи** — расширить `NetworkConnector` методом `bind_udp`; провести через `components/media/webrtc` (`webrtc` крейт) фабрику сокетов; политика ICE (`iceTransportPolicy: relay` навязать); mDNS-кандидаты отключить; тест «страница WebRTC-leak не видит реальный IP».
 **Приёмка** — автотест утечки зелёный; по умолчанию WebRTC остаётся выключенным.
+**Итог N9 (2026-10-10, вариант «relay через прокси», без UDP в коннекторе):** в Servo 0.7 WebRTC минимален (`webrtcbin` из GStreamer; из `iceServers` брался только первый URL как STUN, TURN и `iceTransportPolicy` не поддерживались). Сток `libnice` открывает UDP-сокеты на **каждом** интерфейсе, шлёт SSDP/UPnP-запросы роутеру и раскрывает LAN-адреса и (через STUN) публичный IP — проверено `ss`. Сделано в `components/media/backends/gstreamer/webrtc.rs`: `WebRtcNetworkPolicy{relay_only, proxy, proxy_credentials}` + `servo::set_webrtc_network_policy`; всегда `upnp=false`; при `relay_only`: `ice-udp=false`, `force-relay`, `ice-transport-policy=relay`, STUN игнорируется, агент ограничен адресом 127.0.0.1 (`nice_agent_add_local_address` через `libloading`: `ice-udp` и `ice-tcp` нельзя выключить оба, а TCP-host-кандидаты иначе слушают на всех адресах LAN), TURN-серверы страницы (`turn:`/`turns:`, теперь **все** `iceServers` с логином и паролем — `IceServer`, `configure_ice_servers`) принудительно по TCP; весь ICE-TCP идёт через HTTP `CONNECT`-прокси встраивателя (`proxy-type=2` — это обычный guint, не enum-ник). Юнит-тест разбора TURN-URL. Не проверено: реальный TURN-сервер (медиа через relay) — стояла заглушка; `getUserMedia`/медиатреки Servo 0.7 почти не умеют, звонки Meet/Zoom не ожидаются.
 
 ### N10 — HTTP/3 (QUIC) в сетевом слое Servo
 Размер: L | Зависит от: N2 (UDP), решение по потолку датаграммы ядра NRXP
@@ -232,7 +233,7 @@ Feature `multiprocess` у `servo`: страницы (script/layout) в отде�
 | N6 | Печать / PDF (сначала спайк) | N0 | L | N6a done (растровая печать в браузере, 2026-10-10); настоящая печать — ждёт апстрим |
 | N7 | Медиа и MSE (сначала спайки) | N0 | M+L | todo |
 | N8 | Service Workers / Cache API | N2 | M | todo |
-| N9 | WebRTC через туннель | N2 | L | todo |
+| N9 | WebRTC через туннель | N2 | L | done в виде relay-only через прокси туннеля (2026-10-10); UDP в коннекторе не делали |
 | N10 | HTTP/3 | N2, ядро | L | todo (блокер: потолок датаграммы) |
 | N11 | Пароли, формы, a11y | N0 | M | todo |
 | N12 | Мультипроцесс и песочница | N2 | L | todo |

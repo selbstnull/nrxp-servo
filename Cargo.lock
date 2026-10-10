@@ -8899,6 +8899,7 @@ dependencies = [
  "gstreamer-sys",
  "gstreamer-video",
  "gstreamer-webrtc",
+ "libloading 0.8.9",
  "log",
  "servo-base",
  "servo-media",

@@ -189,6 +189,26 @@ impl RTCPeerConnection {
         );
         let signaller = this.make_signaller();
         *this.controller.borrow_mut() = Some(ServoMedia::get().create_webrtc(signaller));
+        if let Some(ref servers) = config.iceServers {
+            let list: Vec<servo_media::webrtc::IceServer> = servers
+                .iter()
+                .map(|server| servo_media::webrtc::IceServer {
+                    urls: match server.urls {
+                        StringOrStringSequence::String(ref s) => vec![s.to_string()],
+                        StringOrStringSequence::StringSequence(ref s) => {
+                            s.iter().map(|u| u.to_string()).collect()
+                        },
+                    },
+                    username: server.username.as_ref().map(|u| u.to_string()),
+                    credential: server.credential.as_ref().map(|c| c.to_string()),
+                })
+                .collect();
+            this.controller
+                .borrow()
+                .as_ref()
+                .unwrap()
+                .configure_ice_servers(list);
+        }
         if let Some(ref servers) = config.iceServers &&
             let Some(server) = servers.first()
         {

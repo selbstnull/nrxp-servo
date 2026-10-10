@@ -20,6 +20,8 @@ use servo_media_webrtc::datachannel::DataChannelId;
 use servo_media_webrtc::thread::InternalEvent;
 use servo_media_webrtc::{WebRtcController as WebRtcThread, *};
 
+use std::sync::RwLock;
+
 use super::BACKEND_BASE_TIME;
 use crate::datachannel::GStreamerWebRtcDataChannel;
 use crate::media_stream::GStreamerMediaStream;
@@ -87,6 +89,176 @@ pub struct GStreamerWebRtcController {
     _main_loop: glib::MainLoop,
     data_channels: Arc<Mutex<HashMap<DataChannelId, DataChannelEventTarget>>>,
     next_data_channel_id: Arc<AtomicUsize>,
+}
+
+/// How WebRTC may use the network (nrxp-servo N9), set once by the embedder for the whole process.
+///
+/// Stock `libnice` opens UDP sockets on **every local interface** (and probes the router over UPnP/SSDP), so a page
+/// learns the LAN addresses and the real public IP (STUN). With `relay_only` nothing of that happens: no UDP, no TCP
+/// host candidates, no STUN, no UPnP; the only network use is a TURN allocation over TCP, which — with `proxy` set —
+/// goes through the embedder's HTTP `CONNECT` proxy (i.e. through the tunnel).
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct WebRtcNetworkPolicy {
+    /// Relay only: gather no host/server-reflexive candidates, use TURN over TCP exclusively.
+    pub relay_only: bool,
+    /// `(host, port)` of an HTTP `CONNECT` proxy that all ICE TCP connections (TURN) go through.
+    pub proxy: Option<(String, u16)>,
+    /// Basic credentials for that proxy (a local proxy must not be open to every process on the machine).
+    pub proxy_credentials: Option<(String, String)>,
+}
+
+static NETWORK_POLICY: RwLock<WebRtcNetworkPolicy> = RwLock::new(WebRtcNetworkPolicy {
+    relay_only: false,
+    proxy: None,
+    proxy_credentials: None,
+});
+
+/// Sets the network policy for WebRTC connections created from now on.
+pub fn set_network_policy(policy: WebRtcNetworkPolicy) {
+    *NETWORK_POLICY.write().unwrap() = policy;
+}
+
+fn network_policy() -> WebRtcNetworkPolicy {
+    NETWORK_POLICY.read().unwrap().clone()
+}
+
+/// Restricts the libnice agent to the loopback address, so it does not enumerate the machine's interfaces: without
+/// this it still opens listening TCP sockets on every LAN address (`ice-udp` and `ice-tcp` cannot both be turned off).
+/// libnice has no GObject property for this, only the C call `nice_agent_add_local_address`, which is resolved at run
+/// time (the library is already loaded by GStreamer's nice plugin). Returns `false` when that was not possible.
+fn restrict_agent_to_loopback(agent: &glib::Object) -> bool {
+    use std::ffi::{CString, c_char, c_int, c_void};
+
+    #[cfg(target_os = "windows")]
+    const NAMES: &[&str] = &["libnice-10.dll", "nice-10.dll", "libnice.dll"];
+    #[cfg(target_os = "macos")]
+    const NAMES: &[&str] = &["libnice.10.dylib", "libnice.dylib"];
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    const NAMES: &[&str] = &["libnice.so.10", "libnice.so"];
+
+    type New = unsafe extern "C" fn() -> *mut c_void;
+    type Free = unsafe extern "C" fn(*mut c_void);
+    type SetFromString = unsafe extern "C" fn(*mut c_void, *const c_char) -> c_int;
+    type AddLocal = unsafe extern "C" fn(*mut c_void, *mut c_void) -> c_int;
+
+    let Some(library) = NAMES
+        .iter()
+        // SAFETY: loading a shared library that is already mapped by GStreamer's nice plugin; no initializers of ours.
+        .find_map(|name| unsafe { libloading::Library::new(name) }.ok())
+    else {
+        warn!("libnice not found: cannot restrict ICE to loopback");
+        return false;
+    };
+    // SAFETY: the symbols are the documented libnice API with exactly these signatures; `agent` is a live NiceAgent
+    // (GObject pointer), and the address is freed after use (the agent copies it).
+    unsafe {
+        let (Ok(new), Ok(free), Ok(set), Ok(add)) = (
+            library.get::<New>(b"nice_address_new\0"),
+            library.get::<Free>(b"nice_address_free\0"),
+            library.get::<SetFromString>(b"nice_address_set_from_string\0"),
+            library.get::<AddLocal>(b"nice_agent_add_local_address\0"),
+        ) else {
+            warn!("libnice without nice_agent_add_local_address");
+            return false;
+        };
+        let address = new();
+        if address.is_null() {
+            return false;
+        }
+        let text = CString::new("127.0.0.1").unwrap();
+        let ok = set(address, text.as_ptr()) != 0 && add(agent.as_ptr().cast(), address) != 0;
+        free(address);
+        ok
+    }
+}
+
+/// Applies the process-wide network policy to a fresh `webrtcbin` (before any gathering starts).
+fn apply_network_policy(webrtc: &gstreamer::Element) {
+    let policy = network_policy();
+    let Some(ice) = webrtc.property::<Option<glib::Object>>("ice-agent") else {
+        warn!("webrtcbin without an ICE agent: network policy not applied");
+        return;
+    };
+    let Some(agent) = ice.property::<Option<glib::Object>>("agent") else {
+        warn!("ICE agent without a libnice agent: network policy not applied");
+        return;
+    };
+    // Never probe the router (SSDP multicast on every interface), policy or not.
+    agent.set_property("upnp", false);
+    if policy.relay_only {
+        // The GstWebRTCNice wrapper has its own `ice-udp`/`ice-tcp` and pushes them into the agent when gathering
+        // starts: set both, otherwise passive TCP candidates still listen on every interface.
+        ice.set_property("ice-udp", false);
+        ice.set_property("ice-tcp", false);
+        agent.set_property("ice-udp", false);
+        agent.set_property("ice-tcp", false);
+        agent.set_property("force-relay", true);
+        if !restrict_agent_to_loopback(&agent) {
+            warn!("WebRTC relay-only: could not restrict ICE to loopback, TCP candidates may listen on LAN addresses");
+        }
+        webrtc.set_property_from_str("ice-transport-policy", "relay");
+    }
+    if let Some((host, port)) = &policy.proxy {
+        // NiceProxyType as a plain guint: 0 none, 1 SOCKS5, 2 HTTP CONNECT.
+        agent.set_property("proxy-type", 2u32);
+        agent.set_property("proxy-ip", host.as_str());
+        agent.set_property("proxy-port", u32::from(*port));
+        if let Some((user, password)) = &policy.proxy_credentials {
+            agent.set_property("proxy-username", user.as_str());
+            agent.set_property("proxy-password", password.as_str());
+        }
+    }
+}
+
+/// Percent-encodes a user/password for a `turn://user:pass@host` URI.
+fn uri_escape(text: &str) -> String {
+    let mut out = String::new();
+    for byte in text.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            out.push(byte as char);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
+}
+
+/// `turn:host:3478?transport=udp` / `turns:host` (RFC 7065) → the form GStreamer wants:
+/// `turn://user:pass@host:port?transport=tcp`. With `force_tcp` the transport is rewritten to TCP (TURN servers
+/// accept TCP on their UDP port; UDP cannot go through the tunnel). `None` for an unusable URL.
+fn turn_uri(url: &str, username: &str, credential: &str, force_tcp: bool) -> Option<String> {
+    let (scheme, rest) = url.split_once(':')?;
+    let secure = match scheme.to_ascii_lowercase().as_str() {
+        "turn" => false,
+        "turns" => true,
+        _ => return None,
+    };
+    let (hostport, query) = rest.split_once('?').map_or((rest, ""), |(a, b)| (a, b));
+    let hostport = hostport.trim_start_matches("//");
+    if hostport.is_empty() {
+        return None;
+    }
+    let (host, port) = match hostport.rsplit_once(':') {
+        // `[v6]:port` and bare `[v6]` both contain ':' — only a trailing numeric part is a port.
+        Some((host, port)) if port.chars().all(|c| c.is_ascii_digit()) && !port.is_empty() => {
+            (host, port.to_owned())
+        },
+        _ => (hostport, if secure { "5349" } else { "3478" }.to_owned()),
+    };
+    let mut transport = query
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("transport="))
+        .unwrap_or(if secure { "tcp" } else { "udp" })
+        .to_ascii_lowercase();
+    if force_tcp {
+        transport = "tcp".to_owned();
+    }
+    Some(format!(
+        "{}://{}:{}@{host}:{port}?transport={transport}",
+        if secure { "turns" } else { "turn" },
+        uri_escape(username),
+        uri_escape(credential),
+    ))
 }
 
 impl WebRtcControllerBackend for GStreamerWebRtcController {
@@ -204,9 +376,32 @@ impl WebRtcControllerBackend for GStreamerWebRtcController {
         }
     }
 
+    fn configure_ice_servers(&mut self, servers: Vec<IceServer>) -> WebRtcResult {
+        let relay_only = network_policy().relay_only;
+        for server in servers {
+            for url in &server.urls {
+                if let Some(uri) = turn_uri(
+                    url,
+                    server.username.as_deref().unwrap_or(""),
+                    server.credential.as_deref().unwrap_or(""),
+                    relay_only,
+                ) {
+                    let added = self.webrtc.emit_by_name::<bool>("add-turn-server", &[&uri]);
+                    if !added {
+                        warn!("webrtcbin refused a TURN server");
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn configure(&mut self, stun_server: &str, policy: BundlePolicy) -> WebRtcResult {
-        self.webrtc
-            .set_property_from_str("stun-server", stun_server);
+        // Relay only: a STUN binding request would reveal the public address.
+        if !network_policy().relay_only {
+            self.webrtc
+                .set_property_from_str("stun-server", stun_server);
+        }
         self.webrtc
             .set_property_from_str("bundle-policy", policy.as_str());
         Ok(())
@@ -662,6 +857,7 @@ pub fn construct(
         .name("sendrecv")
         .build()
         .map_err(|error| format!("webrtcbin element not found: {error:?}"))?;
+    apply_network_policy(&webrtc);
     let mut controller = GStreamerWebRtcController {
         webrtc,
         pipeline,
@@ -819,4 +1015,29 @@ fn register_data_channel(
         .unwrap()
         .insert(id, DataChannelEventTarget::Created(channel));
     Ok(id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn turn_urls_become_gstreamer_uris() {
+        assert_eq!(
+            turn_uri("turn:example.org:3478?transport=udp", "u", "p", false).as_deref(),
+            Some("turn://u:p@example.org:3478?transport=udp")
+        );
+        // The tunnel carries TCP only.
+        assert_eq!(
+            turn_uri("turn:example.org?transport=udp", "u", "p", true).as_deref(),
+            Some("turn://u:p@example.org:3478?transport=tcp")
+        );
+        assert_eq!(
+            turn_uri("turns:example.org", "us er", "p:w@d", true).as_deref(),
+            Some("turns://us%20er:p%3Aw%40d@example.org:5349?transport=tcp")
+        );
+        assert_eq!(turn_uri("stun:example.org", "", "", true), None);
+        assert_eq!(turn_uri("turn:", "", "", true), None);
+        assert_eq!(turn_uri("nonsense", "", "", true), None);
+    }
 }
