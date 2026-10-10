@@ -14,11 +14,12 @@ use embedder_traits::{
     SelectElementOptionOrOptgroup, SelectElementRequest, SimpleDialogRequest, TraversalId,
     WebResourceRequest, WebResourceResponse, WebResourceResponseMsg,
 };
+use net::download::{DownloadEvent, DownloadInfo};
 use paint_api::rendering_context::RenderingContext;
 use servo_base::generic_channel::{GenericCallback, GenericSender, SendError};
 use servo_base::id::PipelineId;
 use servo_constellation_traits::EmbedderToConstellationMessage;
-use tokio::sync::mpsc::UnboundedSender as TokioSender;
+use tokio::sync::mpsc::{Sender as TokioBoundedSender, UnboundedSender as TokioSender};
 use tokio::sync::oneshot::Sender;
 use url::Url;
 use webrender_api::units::{DeviceIntPoint, DeviceIntRect, DeviceIntSize};
@@ -231,6 +232,80 @@ impl AuthenticationRequest {
         {
             self.error_sender.raise_response_send_error(error);
         }
+    }
+}
+
+/// A navigation response that looks like a download (`Content-Disposition: attachment`, or a type
+/// the engine cannot display). Accept it to receive the body as a [`DownloadStream`] — the page
+/// that started the navigation stays as it is — or decline it (also by dropping the request) and
+/// the engine handles the response as it would without a hook.
+///
+/// Created by the nrxp-servo fork (N3b); not in upstream Servo.
+pub struct DownloadRequest {
+    pub(crate) info: DownloadInfo,
+    pub(crate) responder: AutomaticResponder<Option<TokioBoundedSender<DownloadEvent>>>,
+}
+
+impl DownloadRequest {
+    pub(crate) fn new(
+        info: DownloadInfo,
+        response_sender: Sender<Option<TokioBoundedSender<DownloadEvent>>>,
+    ) -> Self {
+        Self {
+            info,
+            responder: AutomaticResponder::new_same_process(
+                Box::new(OneshotSender::from(response_sender)),
+                None,
+            ),
+        }
+    }
+
+    /// Where the response came from (after redirects).
+    pub fn url(&self) -> Url {
+        self.info.url.clone().into_url()
+    }
+    /// File name from `Content-Disposition`, **not sanitized** (may contain `/`, `..`, control characters).
+    pub fn suggested_filename(&self) -> Option<&str> {
+        self.info.suggested_filename.as_deref()
+    }
+    /// `Content-Type` without parameters, lowercase.
+    pub fn mime(&self) -> Option<&str> {
+        self.info.mime.as_deref()
+    }
+    pub fn content_length(&self) -> Option<u64> {
+        self.info.content_length
+    }
+    /// The navigation was a `POST`: the download cannot be repeated by fetching the URL.
+    pub fn is_post(&self) -> bool {
+        self.info.is_post
+    }
+
+    /// Takes the download. The stream holds at most `buffer` chunks: a slow reader slows the
+    /// network transfer, memory does not grow. Dropping the stream cancels the transfer.
+    pub fn accept(mut self, buffer: usize) -> DownloadStream {
+        let (sender, receiver) = tokio::sync::mpsc::channel(buffer.max(1));
+        // If the engine is already gone the stream just yields `None`.
+        let _ = self.responder.send(Some(sender));
+        DownloadStream { receiver }
+    }
+
+    /// Leaves the response to the engine.
+    pub fn decline(self) {}
+}
+
+/// The body of an accepted download.
+pub struct DownloadStream {
+    receiver: tokio::sync::mpsc::Receiver<DownloadEvent>,
+}
+
+impl DownloadStream {
+    /// Waits for the next event; `None` when the engine dropped the transfer.
+    pub async fn recv(&mut self) -> Option<DownloadEvent> {
+        self.receiver.recv().await
+    }
+    /// Same, for threads without a runtime.
+    pub fn blocking_recv(&mut self) -> Option<DownloadEvent> {
+        self.receiver.blocking_recv()
     }
 }
 
@@ -1037,6 +1112,12 @@ pub trait WebViewDelegate {
         _webview: WebView,
         _authentication_request: AuthenticationRequest,
     ) {
+    }
+
+    /// A navigation response is a download (nrxp-servo N3b). By default it is declined, so the
+    /// engine behaves as before.
+    fn request_download(&self, _webview: WebView, request: DownloadRequest) {
+        request.decline();
     }
 
     /// Open dialog to select bluetooth device.

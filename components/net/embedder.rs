@@ -15,6 +15,8 @@ use servo_url::ServoUrl;
 use tokio::sync::mpsc::UnboundedSender as TokioSender;
 use tokio::sync::oneshot::Sender as TokioOneshotSender;
 
+use crate::download::{DownloadEvent, DownloadInfo};
+
 /// Messages sent from the network threads to the embedder.
 pub enum NetToEmbedderMsg {
     /// Open file dialog to select files. Set boolean flag to true allows to select multiple files.
@@ -34,6 +36,14 @@ pub enum NetToEmbedderMsg {
         ServoUrl,
         bool, /* for proxy */
         TokioOneshotSender<Option<AuthenticationResponse>>,
+    ),
+    /// A navigation response that looks like a download is offered to the embedder. `Some(sender)`
+    /// accepts: the body is sent through it (bounded, so a slow embedder slows the transfer) and
+    /// the navigation is aborted; `None` declines and the engine handles the response as before.
+    RequestDownload(
+        WebViewId,
+        DownloadInfo,
+        TokioOneshotSender<Option<tokio::sync::mpsc::Sender<DownloadEvent>>>,
     ),
     /// Response to an asynchronous request from SiteDataManager with cookies result.
     EmbedderCookieOperationResponseWithCookies(CookieOperationId, Vec<Cookie<'static>>),

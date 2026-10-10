@@ -70,6 +70,7 @@ pub use media::{
     GlApi as MediaGlApi, GlContext as MediaGlContext, NativeDisplay as MediaNativeDisplay,
 };
 pub use net::connector::{ConnectFuture, NetworkConnector, NetworkStream};
+pub use net::download::DownloadEvent;
 pub use net::image_cache::should_panic_hook_suppress_termination;
 pub use net_traits::CookieSource;
 // This API should probably not be exposed in this way. Instead there should be a fully
@@ -118,7 +119,8 @@ pub use crate::user_content_manager::UserContentManager;
 pub use crate::webview::{WebView, WebViewBuilder};
 pub use crate::webview_delegate::{
     AlertDialog, AllowOrDenyRequest, AuthenticationRequest, BluetoothDeviceSelectionRequest,
-    ColorPicker, ConfirmDialog, ContextMenu, CreateNewWebViewRequest, EmbedderControl, FilePicker,
+    ColorPicker, ConfirmDialog, ContextMenu, CreateNewWebViewRequest, DownloadRequest,
+    DownloadStream, EmbedderControl, FilePicker,
     InputMethodControl, NavigationRequest, PermissionRequest, PromptDialog, SelectElement,
     SimpleDialog, WebResourceLoad, WebViewDelegate,
 };

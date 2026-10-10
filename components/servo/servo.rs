@@ -110,8 +110,9 @@ use crate::servo_delegate::{DefaultServoDelegate, ServoDelegate, ServoError};
 use crate::site_data_manager::{CookieOperationResponse, SiteDataManager};
 use crate::webview::{MINIMUM_WEBVIEW_SIZE, WebView, WebViewInner};
 use crate::webview_delegate::{
-    AllowOrDenyRequest, AuthenticationRequest, BluetoothDeviceSelectionRequest, EmbedderControl,
-    FilePicker, NavigationRequest, PermissionRequest, ProtocolHandlerRegistration, WebResourceLoad,
+    AllowOrDenyRequest, AuthenticationRequest, BluetoothDeviceSelectionRequest, DownloadRequest,
+    EmbedderControl, FilePicker, NavigationRequest, PermissionRequest, ProtocolHandlerRegistration,
+    WebResourceLoad,
 };
 
 #[cfg(feature = "media-gstreamer")]
@@ -471,6 +472,13 @@ impl ServoInner {
                     webview
                         .delegate()
                         .request_authentication(webview, authentication_request);
+                }
+            },
+            NetToEmbedderMsg::RequestDownload(webview_id, info, response_sender) => {
+                // Without a webview there is nobody to ask: dropping the sender declines.
+                if let Some(webview) = self.get_webview_handle(webview_id) {
+                    let request = DownloadRequest::new(info, response_sender);
+                    webview.delegate().request_download(webview, request);
                 }
             },
             NetToEmbedderMsg::EmbedderCookieOperationResponseWithCookies(operation_id, cookies) => {

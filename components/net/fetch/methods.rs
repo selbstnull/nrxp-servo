@@ -51,6 +51,8 @@ use crate::connector::CACertificates;
 use crate::devtools::{
     send_early_httprequest_to_devtools, send_response_to_devtools, send_security_info_to_devtools,
 };
+use crate::download::{self, DownloadEvent, DownloadInfo};
+use crate::embedder::NetToEmbedderMsg;
 use crate::fetch::cors_cache::CorsCache;
 use crate::fetch::fetch_params::{
     ConsumePreloadedResources, FetchParams, SharedPreloadedResources,
@@ -863,6 +865,12 @@ pub async fn main_fetch(
         target.process_request_body(request);
     }
 
+    // nrxp-servo N3b: a download is taken over by the embedder instead of becoming a document.
+    if let Some(events) = offer_download(request, &response, context).await {
+        stream_download(request, &mut response, target, done_chan, events).await;
+        return response;
+    }
+
     // Step 22.
     target.process_response(request, &response);
     // Send Response to Devtools
@@ -890,6 +898,90 @@ pub async fn main_fetch(
     // Steps 25-27.
     // TODO: remove this line when only asynchronous fetches are used
     response
+}
+
+/// Offers a navigation response that looks like a download to the embedder. `Some` — it accepted.
+async fn offer_download(
+    request: &Request,
+    response: &Response,
+    context: &FetchContext,
+) -> Option<tokio::sync::mpsc::Sender<DownloadEvent>> {
+    let webview_id = request.target_webview_id?;
+    if request.mode != RequestMode::Navigate ||
+        response.is_network_error() ||
+        !response.status.in_range(200..=299) ||
+        response.status.in_range(204..=205) ||
+        !download::is_download_response(&response.headers)
+    {
+        return None;
+    }
+    let info = DownloadInfo {
+        url: response.url().cloned().unwrap_or_else(|| request.url()),
+        suggested_filename: download::filename_of(&response.headers),
+        mime: download::mime_of(&response.headers),
+        content_length: download::content_length_of(&response.headers),
+        is_post: request.method == Method::POST,
+    };
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    context
+        .state
+        .embedder_proxy
+        .send(NetToEmbedderMsg::RequestDownload(webview_id, info, sender));
+    receiver.await.ok()?
+}
+
+/// Delivers the body to the embedder and ends the navigation like a 204 (the page stays).
+async fn stream_download(
+    request: &Request,
+    response: &mut Response,
+    target: Target<'_>,
+    done_chan: &mut DoneChannel,
+    events: tokio::sync::mpsc::Sender<DownloadEvent>,
+) {
+    let mut no_content = Response::new(
+        request.url(),
+        ResourceFetchTiming::new(request.timing_type()),
+    );
+    no_content.status = HttpStatus::from(StatusCode::NO_CONTENT);
+    target.process_response(request, &no_content);
+    target.process_response_eof(request, &no_content);
+
+    let outcome = if let Some(ref mut ch) = *done_chan {
+        loop {
+            match ch.1.recv().await {
+                Some(Data::ContentLength(_)) => {},
+                Some(Data::Payload(bytes)) => {
+                    if events.send(DownloadEvent::Chunk(bytes)).await.is_err() {
+                        // The embedder dropped the stream: stop reading.
+                        break Err(None);
+                    }
+                },
+                Some(Data::Error(error)) => break Err(Some(format!("{error:?}"))),
+                Some(Data::Done) => break Ok(()),
+                Some(Data::Cancelled) | None => break Err(Some("cancelled".to_owned())),
+            }
+        }
+    } else {
+        // The body was produced synchronously (cache, data:, …).
+        let body = match *response.actual_response().body.lock() {
+            ResponseBody::Done(ref bytes) => Some(Bytes::copy_from_slice(bytes)),
+            _ => None,
+        };
+        if let Some(body) = body {
+            let _ = events.send(DownloadEvent::Chunk(body)).await;
+        }
+        Ok(())
+    };
+    match outcome {
+        Ok(()) => {
+            let _ = events.send(DownloadEvent::Done).await;
+        },
+        Err(Some(reason)) => {
+            let _ = events.send(DownloadEvent::Failed(reason)).await;
+            response.aborted.store(true, Ordering::Release);
+        },
+        Err(None) => response.aborted.store(true, Ordering::Release),
+    }
 }
 
 async fn wait_for_response(
