@@ -50,6 +50,24 @@ impl JavaScriptEvaluator {
             .insert(evaluation_id, PendingEvaluation { callback });
     }
 
+    /// "Find in page" (nrxp-servo N5b): the answer arrives like an evaluation result (a JSON string).
+    pub(crate) fn find(
+        &mut self,
+        webview_id: WebViewId,
+        request: embedder_traits::FindRequest,
+        callback: Box<dyn FnOnce(Result<JSValue, JavaScriptEvaluationError>)>,
+    ) {
+        let evaluation_id = self.generate_id();
+        self.constellation_proxy
+            .send(EmbedderToConstellationMessage::Find(
+                webview_id,
+                evaluation_id,
+                request,
+            ));
+        self.pending_evaluations
+            .insert(evaluation_id, PendingEvaluation { callback });
+    }
+
     pub(crate) fn finish_evaluation(
         &mut self,
         evaluation_id: JavaScriptEvaluationId,

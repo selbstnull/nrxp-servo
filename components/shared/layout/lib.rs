@@ -80,8 +80,20 @@ use uuid::Uuid;
 use webrender_api::units::{DeviceIntSize, LayoutPoint, LayoutVector2D};
 use webrender_api::{ExternalScrollId, ImageKey};
 
+/// A "find in page" match inside one text node (nrxp-servo N5b): a range of the node's text and whether it is the
+/// active match (painted in another colour). Offsets are counted like the document selection's.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, MallocSizeOf)]
+pub struct FindHighlight {
+    pub range: RangeAny<Utf32CodeUnits>,
+    pub active: bool,
+}
+
 pub trait GenericLayoutDataTrait: Any + MallocSizeOfTrait + Send + Sync + 'static {
     fn as_any(&self) -> &dyn Any;
+
+    /// Replaces the "find in page" highlights of this text node's run (empty — none). Returns whether it was set on an
+    /// existing text run (the caller then asks for a new display list, no layout).
+    fn set_text_run_find_highlights(&self, highlights: Vec<FindHighlight>) -> bool;
 
     /// Returns whether `new_range` was successfully set on an existing text run
     fn set_text_run_selection(&self, new_range: Option<RangeAny<Utf32CodeUnits>>) -> bool;

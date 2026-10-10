@@ -8,6 +8,7 @@ use std::cell::LazyCell;
 use atomic_refcell::{AtomicRef, AtomicRefCell};
 use dom_struct::dom_struct;
 use js::context::JSContext;
+use layout_api::FindHighlight;
 use script_bindings::codegen::InheritTypes::{CharacterDataTypeId, NodeTypeId, TextTypeId};
 use servo_base::text::{AssumeUnder4GB, RangeAny, Utf16CodeUnits, Utf32CodeUnits};
 
@@ -115,6 +116,15 @@ impl CharacterData {
             .borrow()
             .as_ref()
             .is_some_and(|layout_data| layout_data.set_text_run_selection(new_range))
+    }
+
+    /// Replaces the "find in page" highlights of this node's text run (nrxp-servo N5b); `true` if the node has a run.
+    pub(crate) fn set_text_run_find_highlights(&self, highlights: Vec<FindHighlight>) -> bool {
+        self.upcast::<Node>()
+            .layout_data()
+            .borrow()
+            .as_ref()
+            .is_some_and(|layout_data| layout_data.set_text_run_find_highlights(highlights))
     }
 
     /// Returns the rendered text for this [`CharacterData`].

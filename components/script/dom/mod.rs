@@ -229,6 +229,7 @@ pub(crate) use self::canvas::*;
 pub(crate) mod characterdata;
 pub(crate) use self::characterdata::*;
 pub(crate) mod clipboard;
+pub(crate) mod find;
 pub(crate) use self::clipboard::*;
 pub(crate) mod console;
 pub(crate) mod cookiestore;

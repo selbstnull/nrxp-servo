@@ -740,6 +740,19 @@ impl WebView {
         );
     }
 
+    /// "Find in page" (nrxp-servo N5b): highlights matches in the main document without touching the DOM and
+    /// scrolls to the active one. `callback` gets a JSON string `{"count":N,"active":I|null}` (`I` — index of the
+    /// active match). Only the top-level document is searched.
+    pub fn find(
+        &self,
+        request: embedder_traits::FindRequest,
+        callback: impl FnOnce(Result<JSValue, JavaScriptEvaluationError>) + 'static,
+    ) {
+        self.servo()
+            .javascript_evaluator_mut()
+            .find(self.id(), request, Box::new(callback));
+    }
+
     /// Asynchronously take a screenshot of the [`WebView`] contents, given a `rect` or the whole
     /// viewport, if no `rect` is given.
     ///

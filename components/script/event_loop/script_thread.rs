@@ -44,8 +44,9 @@ use devtools_traits::{
 };
 use embedder_traits::user_contents::{UserContentManagerId, UserContents, UserScript};
 use embedder_traits::{
+    FindRequest,
     EmbedderControlId, EmbedderControlResponse, EmbedderMsg, FocusSequenceNumber,
-    InputEventOutcome, JavaScriptEvaluationError, JavaScriptEvaluationId, MediaSessionActionType,
+    InputEventOutcome, JSValue, JavaScriptEvaluationError, JavaScriptEvaluationId, MediaSessionActionType,
     ViewportDetails, WebDriverScriptCommand,
 };
 use encoding_rs::Encoding;
@@ -1900,6 +1901,9 @@ impl ScriptThread {
                 script,
             ) => {
                 self.handle_evaluate_javascript(webview_id, pipeline_id, evaluation_id, script, cx);
+            },
+            ScriptThreadMessage::Find(webview_id, pipeline_id, evaluation_id, request) => {
+                self.handle_find(webview_id, pipeline_id, evaluation_id, request, cx);
             },
             ScriptThreadMessage::SendImageKeysBatch(pipeline_id, image_keys) => {
                 if let Some(window) = self.documents.borrow().find_window(pipeline_id) {
@@ -4558,6 +4562,32 @@ impl ScriptThread {
         };
 
         let result = jsval_to_webdriver(cx, global_scope, return_value.handle());
+        let _ = self.senders.pipeline_to_constellation_sender.send((
+            webview_id,
+            pipeline_id,
+            ScriptToConstellationMessage::FinishJavaScriptEvaluation(evaluation_id, result),
+        ));
+    }
+
+    /// "Find in page" (nrxp-servo N5b): runs in the top-level document, answers with a JSON string.
+    fn handle_find(
+        &self,
+        webview_id: WebViewId,
+        pipeline_id: PipelineId,
+        evaluation_id: JavaScriptEvaluationId,
+        request: FindRequest,
+        cx: &mut js::context::JSContext,
+    ) {
+        let result = match self.documents.borrow().find_document(pipeline_id) {
+            Some(document) => {
+                let (count, active) = crate::dom::find::run(cx, &document, &request);
+                let active = active.map_or_else(|| "null".to_owned(), |i| i.to_string());
+                Ok(JSValue::String(format!(
+                    "{{\"count\":{count},\"active\":{active}}}"
+                )))
+            },
+            None => Err(JavaScriptEvaluationError::WebViewNotReady),
+        };
         let _ = self.senders.pipeline_to_constellation_sender.send((
             webview_id,
             pipeline_id,

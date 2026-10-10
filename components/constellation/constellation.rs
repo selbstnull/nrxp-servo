@@ -108,6 +108,7 @@ use devtools_traits::{
 use embedder_traits::resources::{self, Resource};
 use embedder_traits::user_contents::{UserContentManagerId, UserContents};
 use embedder_traits::{
+    FindRequest,
     AnimationState, EmbedderControlId, EmbedderControlResponse, EmbedderProxy, FocusSequenceNumber,
     GenericEmbedderProxy, InputEvent, InputEventAndId, InputEventOutcome, JSValue,
     JavaScriptEvaluationError, JavaScriptEvaluationId, KeyboardEvent, MediaSessionActionType,
@@ -1411,6 +1412,9 @@ where
                 script,
             ) => {
                 self.handle_evaluate_javascript(webview_id, evaluation_id, script);
+            },
+            EmbedderToConstellationMessage::Find(webview_id, evaluation_id, request) => {
+                self.handle_find(webview_id, evaluation_id, request);
             },
             EmbedderToConstellationMessage::CreateMemoryReport(sender) => {
                 self.mem_profiler_chan.send(ProfilerMsg::Report(sender));
@@ -3476,6 +3480,37 @@ where
         self.constellation_to_embedder_proxy.send(
             ConstellationToEmbedderMsg::FinishJavaScriptEvaluation(evaluation_id, result),
         );
+    }
+
+    /// "Find in page" in the top-level document of `webview_id` (nrxp-servo N5b).
+    fn handle_find(
+        &mut self,
+        webview_id: WebViewId,
+        evaluation_id: JavaScriptEvaluationId,
+        request: FindRequest,
+    ) {
+        let browsing_context_id = BrowsingContextId::from(webview_id);
+        let pipeline = self
+            .browsing_contexts
+            .get(&browsing_context_id)
+            .and_then(|browsing_context| self.pipelines.get(&browsing_context.pipeline_id));
+        let sent = pipeline.is_some_and(|pipeline| {
+            pipeline
+                .event_loop
+                .send(ScriptThreadMessage::Find(
+                    webview_id,
+                    pipeline.id,
+                    evaluation_id,
+                    request,
+                ))
+                .is_ok()
+        });
+        if !sent {
+            self.handle_finish_javascript_evaluation(
+                evaluation_id,
+                Err(JavaScriptEvaluationError::InternalError),
+            );
+        }
     }
 
     #[servo_tracing::instrument(skip_all)]

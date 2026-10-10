@@ -1033,6 +1033,29 @@ impl Display for FocusSequenceNumber {
 #[derive(Clone, Copy, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct JavaScriptEvaluationId(pub usize);
 
+/// What to do for "find in page" (nrxp-servo N5b).
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum FindAction {
+    /// Search again from the top of the page: all matches highlighted, the first (or the one after the current scroll
+    /// position) active and scrolled into view.
+    Search,
+    /// Search again without moving: keeps the active match (by index) and does not scroll. For pages that changed.
+    Refresh,
+    Next,
+    Previous,
+    /// Remove all highlights.
+    Clear,
+}
+
+/// A "find in page" request. The result comes back as a JSON string `{"count":N,"active":I}` (`active` is `null` when
+/// there are no matches), through the same callback path as `evaluate_javascript`.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct FindRequest {
+    pub action: FindAction,
+    pub query: String,
+    pub case_sensitive: bool,
+}
+
 /// A JavaScript value produced by evaluation of a script.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub enum JSValue {

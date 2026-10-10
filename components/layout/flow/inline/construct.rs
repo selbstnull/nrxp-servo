@@ -488,6 +488,7 @@ impl InlineFormattingContextBuilder {
                 character_range_in_ifc_text: new_character_range,
                 original_offset: original_size_before,
                 selection: AtomicRefCell::new(selection),
+                find_highlights: Default::default(),
                 paint_caret: info.node.text_node_paints_caret(),
                 offset_map: self.offset_map.clone(),
             }

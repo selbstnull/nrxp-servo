@@ -1140,6 +1140,7 @@ impl Fragment {
             );
         }
 
+        Self::build_display_list_for_find_highlights(fragment, builder, state, line_box_rect);
         Self::build_display_list_for_text_selection(fragment, builder, state, line_box_rect);
 
         for text_decoration in state.text_decorations.iter() {
@@ -1318,6 +1319,84 @@ impl Fragment {
                 do_aa: true,
             }),
         );
+    }
+
+    /// "Find in page" matches (nrxp-servo N5b): background rectangles behind the text, painted before the document
+    /// selection so a selected match stays visible. Same geometry rules (and limits: no vertical or RTL text) as the
+    /// selection below.
+    fn build_display_list_for_find_highlights(
+        fragment: &TextFragment,
+        builder: &mut DisplayListBuilder<'_>,
+        state: &TraversalState,
+        line_box_rect: &PhysicalRect<Au>,
+    ) {
+        let run_data = &fragment.run_data;
+        let highlights = run_data.find_highlights.borrow();
+        if highlights.is_empty() {
+            return;
+        }
+        let parent_style = fragment.style();
+        for highlight in highlights.iter() {
+            let range = run_data.map_dom_range_to_transformed_range(highlight.range);
+            if range.is_empty() ||
+                fragment.character_range_in_dom_node.start >= range.end ||
+                fragment.character_range_in_dom_node.end <= range.start
+            {
+                continue;
+            }
+            let mut current_character_index = fragment.character_range_in_dom_node.start;
+            let mut current_advance = Au::zero();
+            let mut start_advance = None;
+            let mut end_advance = None;
+            for glyph_store in fragment.glyphs.iter() {
+                let count = glyph_store.character_count();
+                if current_character_index + count < range.start {
+                    current_advance += glyph_store.total_advance() +
+                        (fragment.justification_adjustment *
+                            glyph_store.total_word_separators() as i32);
+                    current_character_index += count;
+                    continue;
+                }
+                if current_character_index >= range.end {
+                    break;
+                }
+                for glyph in glyph_store.glyphs() {
+                    if current_character_index >= range.start {
+                        start_advance = start_advance.or(Some(current_advance));
+                    }
+                    current_character_index += glyph.character_count();
+                    current_advance += glyph.advance();
+                    if glyph.char_is_word_separator() {
+                        current_advance += fragment.justification_adjustment;
+                    }
+                    if current_character_index <= range.end {
+                        end_advance = Some(current_advance);
+                    }
+                }
+            }
+            let start_x = start_advance.unwrap_or(current_advance);
+            let end_x = end_advance.unwrap_or(current_advance);
+            if end_x <= start_x {
+                continue;
+            }
+            let fragment_rect = fragment.base.rect();
+            let origin = (state.origin + fragment_rect.origin.to_vector()) +
+                Vector2D::new(start_x, Au::zero());
+            let rect = Rect::new(
+                Point2D::new(origin.x, line_box_rect.min_y()),
+                Size2D::new(end_x - start_x, line_box_rect.height()),
+            )
+            .to_webrender();
+            let color = if highlight.active {
+                // Active match: orange.
+                webrender_api::ColorF::new(1.0, 0.6, 0.0, 0.85)
+            } else {
+                // Other matches: yellow.
+                webrender_api::ColorF::new(1.0, 0.92, 0.23, 0.6)
+            };
+            let common = builder.common_properties(state, rect, &parent_style);
+            builder.wr().push_rect(&common, rect, color);
+        }
     }
 
     // TODO: This caret/text selection implementation currently does not account for vertical text
