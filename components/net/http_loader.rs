@@ -344,6 +344,23 @@ pub fn determine_requests_referrer(
     }
 }
 
+/// nrxp-servo N4b: with `network_block_third_party_cookies` on, a request is cookie-less when the
+/// document that issued it is not same-site with the URL being fetched. Top-level navigations
+/// (`Destination::Document`) are first-party by definition; an unknown initiator is not blocked.
+///
+/// The initiator is the immediately enclosing document, not the top-level one: a frame inside a
+/// third-party frame is judged against that frame.
+fn cookies_blocked_as_third_party(request: &Request, url: &ServoUrl) -> bool {
+    if !pref!(network_block_third_party_cookies) || request.destination == Destination::Document {
+        return false;
+    }
+    let initiator = match (&request.origin, request.client.as_ref().map(|c| &c.origin)) {
+        (Origin::Origin(origin), _) | (Origin::Client, Some(Origin::Origin(origin))) => origin,
+        _ => return false,
+    };
+    !is_same_site(initiator, &url.origin())
+}
+
 fn set_request_cookies(
     url: &ServoUrl,
     headers: &mut HeaderMap,
@@ -1522,11 +1539,13 @@ async fn http_network_or_cache_fetch(
         // Substep 1
         // TODO http://mxr.mozilla.org/servo/source/components/net/http_loader.rs#504
         // XXXManishearth http_loader has block_cookies: support content blocking here too
-        set_request_cookies(
-            &current_url,
-            &mut http_request.headers,
-            &context.state.cookie_jar,
-        );
+        if !cookies_blocked_as_third_party(&http_request, &current_url) {
+            set_request_cookies(
+                &current_url,
+                &mut http_request.headers,
+                &context.state.cookie_jar,
+            );
+        }
         // Substep 2
         if !http_request.headers.contains_key(header::AUTHORIZATION) {
             // Substep 3
@@ -2436,7 +2455,7 @@ async fn http_network_fetch(
 
     // TODO this step isn't possible yet
     // Step 15
-    if credentials_flag {
+    if credentials_flag && !cookies_blocked_as_third_party(request, &url) {
         set_cookies_from_headers(&url, &response.headers, &context.state.cookie_jar);
     }
     context

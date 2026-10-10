@@ -350,6 +350,9 @@ pub struct Preferences {
     pub network_enforce_tls_localhost: bool,
     pub network_enforce_tls_onion: bool,
     pub network_http_cache_disabled: bool,
+    /// nrxp-servo N4b: do not send or store cookies on requests whose initiator is not same-site
+    /// with the request URL (third-party). Top-level navigations are never affected.
+    pub network_block_third_party_cookies: bool,
     /// The path to a disk cache file. Empty string disables the disk cache.
     pub network_http_disk_cache: String,
     /// Maximum size of the disk cache file in bytes.
@@ -574,6 +577,7 @@ impl Preferences {
             network_enforce_tls_localhost: false,
             network_enforce_tls_onion: false,
             network_http_cache_disabled: false,
+            network_block_third_party_cookies: false,
             network_http_disk_cache: String::new(),
             network_http_disk_cache_size: 1024 * 1024 * 100, // Roughtly 100MB
             network_http_proxy_uri: String::new(),
