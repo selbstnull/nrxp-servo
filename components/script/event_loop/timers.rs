@@ -82,6 +82,10 @@ pub(crate) struct OneshotTimers {
     js_timers: JsTimers,
     next_timer_handle: Cell<OneshotTimerHandle>,
     timers: DomRefCell<VecDeque<OneshotTimer>>,
+    /// Timers taken out of `timers` for the `fire_timer` run in progress, earliest first. They have to stay in a traced
+    /// place: a due timer waits here while the ones before it run JS, and a `Vec` on the Rust stack is not visible to the
+    /// GC — its callback could be collected and then called (a crash seen on pages with many timers, e.g. YouTube).
+    timers_to_run: DomRefCell<VecDeque<OneshotTimer>>,
     suspended_since: Cell<Option<Instant>>,
     /// Initially 0, increased whenever the associated document is reactivated
     /// by the amount of ms the document was inactive. The current time can be
@@ -196,6 +200,7 @@ impl OneshotTimers {
             js_timers: JsTimers::default(),
             next_timer_handle: Cell::new(OneshotTimerHandle(1)),
             timers: DomRefCell::new(VecDeque::new()),
+            timers_to_run: DomRefCell::new(VecDeque::new()),
             suspended_since: Cell::new(None),
             suspension_offset: Cell::new(Duration::ZERO),
             expected_event_id: Cell::new(TimerEventId(0)),
@@ -348,8 +353,6 @@ impl OneshotTimers {
 
         // select timers to run to prevent firing timers
         // that were installed during fire of another timer
-        let mut timers_to_run = Vec::new();
-
         loop {
             let mut timers = self.timers.borrow_mut();
 
@@ -357,15 +360,21 @@ impl OneshotTimers {
                 break;
             }
 
-            timers_to_run.push(timers.pop_back().unwrap());
+            self.timers_to_run
+                .borrow_mut()
+                .push_back(timers.pop_back().unwrap());
         }
 
-        for timer in timers_to_run {
+        loop {
+            let Some(timer) = self.timers_to_run.borrow_mut().pop_front() else {
+                break;
+            };
             // Since timers can be coalesced together inside a task,
             // this loop can keep running, including after an interrupt of the JS,
             // and prevent a clean-shutdown of a JS-running thread.
             // This check prevents such a situation.
             if !self.global_scope.can_continue_running() {
+                self.timers_to_run.borrow_mut().clear();
                 return;
             }
             match &timer.callback {
@@ -854,8 +863,8 @@ impl JsTimerTask {
         //
         // Since we choose proactively prevent execution (see 4.1 above), we must only
         // reschedule repeating timers when they were not canceled as part of step 4.2.
-        if self.is_interval == IsInterval::Interval &&
-            timers.active_timers.borrow().contains_key(&self.handle)
+        if self.is_interval == IsInterval::Interval
+            && timers.active_timers.borrow().contains_key(&self.handle)
         {
             timers.initialize_and_schedule(global, self);
         }

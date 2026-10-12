@@ -71,6 +71,8 @@ pub struct Fragment {
     pub end: f64,
     /// First sample is a sync sample: playback may start here.
     pub sync: bool,
+    /// The init segment (see [`SourceBufferState::init_generation`]) this fragment was appended under.
+    pub init_generation: u32,
     data: Vec<u8>,
 }
 
@@ -95,6 +97,9 @@ pub struct AppendResult {
 #[derive(Debug, Default)]
 pub struct SourceBufferState {
     init: Option<InitSegment>,
+    /// Every init segment accepted so far, by generation (1-based), newest last: fragments appended under an older init must
+    /// be announced with that init when they are pushed (a quality switch appends a new init into the same buffer).
+    init_history: Vec<(u32, InitSegment)>,
     /// Bumps each time a *different* init segment is accepted.
     init_generation: u32,
     fragments: Vec<Fragment>,
@@ -114,6 +119,15 @@ impl SourceBufferState {
 
     pub fn init_generation(&self) -> u32 {
         self.init_generation
+    }
+
+    /// The init segment of a generation (the current one if that generation was forgotten).
+    fn init_of(&self, generation: u32) -> Option<&InitSegment> {
+        self.init_history
+            .iter()
+            .find(|(g, _)| *g == generation)
+            .map(|(_, init)| init)
+            .or(self.init.as_ref())
     }
 
     pub fn timestamp_offset(&self) -> f64 {
@@ -172,8 +186,12 @@ impl SourceBufferState {
                         .as_ref()
                         .is_none_or(|existing| existing.raw != init.raw);
                     if changed {
-                        self.init = Some(init);
                         self.init_generation += 1;
+                        self.init_history.push((self.init_generation, init.clone()));
+                        if self.init_history.len() > 32 {
+                            self.init_history.remove(0);
+                        }
+                        self.init = Some(init);
                         result.init_changed = true;
                     }
                 },
@@ -183,7 +201,9 @@ impl SourceBufferState {
                         let Some(init) = self.init.as_ref() else {
                             return Err(MseError::NoInit);
                         };
-                        let fragment = make_fragment(init, moof, &boxed, self.timestamp_offset)?;
+                        let mut fragment =
+                            make_fragment(init, moof, &boxed, self.timestamp_offset)?;
+                        fragment.init_generation = self.init_generation;
                         self.insert(fragment);
                         result.fragments_added += 1;
                     }
@@ -600,6 +620,7 @@ fn make_fragment(
         start,
         end,
         sync,
+        init_generation: 0,
         data,
     })
 }
@@ -670,13 +691,24 @@ fn boxed(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
 /// `ftyp` + one `moov` with every track of every buffer (ids remapped with [`global_track_id`]). `None` until every buffer
 /// has an init segment (a player cannot start with half of the tracks announced).
 pub fn combined_init(buffers: &[&SourceBufferState]) -> Option<Vec<u8>> {
+    let current: Vec<u32> = buffers.iter().map(|b| b.init_generation).collect();
+    combined_init_for(buffers, &current, true)
+}
+
+/// Like [`combined_init`], with the init generation to announce for every buffer; `with_ftyp = false` gives a bare `moov`
+/// (what follows the start of a stream: a changed track configuration in the middle of it).
+fn combined_init_for(
+    buffers: &[&SourceBufferState],
+    generations: &[u32],
+    with_ftyp: bool,
+) -> Option<Vec<u8>> {
     if buffers.is_empty() || buffers.iter().any(|b| b.init.is_none()) {
         return None;
     }
     let mut moov_body = Vec::new();
     let mut mvex_body = Vec::new();
     for (index, buffer) in buffers.iter().enumerate() {
-        let init = buffer.init.as_ref()?;
+        let init = buffer.init_of(*generations.get(index)?)?;
         if index == 0 {
             moov_body.extend_from_slice(&init.mvhd);
         }
@@ -695,6 +727,9 @@ pub fn combined_init(buffers: &[&SourceBufferState]) -> Option<Vec<u8>> {
     }
     moov_body.extend_from_slice(&boxed(b"mvex", &mvex_body));
     let moov = boxed(b"moov", &moov_body);
+    if !with_ftyp {
+        return Some(moov);
+    }
     let mut ftyp_body = Vec::new();
     ftyp_body.extend_from_slice(b"isom");
     ftyp_body.extend_from_slice(&0u32.to_be_bytes());
@@ -737,8 +772,7 @@ pub enum FeedAction {
     Idle,
     /// Push these bytes (the very first chunk includes the merged init segment).
     Push(Vec<u8>),
-    /// An init segment changed after the player was started: restart the player at the current time and feed from
-    /// [`Feeder::start`].
+    /// The set of buffers changed after the player was started: restart the player at the current time with a new feeder.
     Restart,
 }
 
@@ -749,8 +783,8 @@ pub struct Feeder {
     /// or before it is the first one sent).
     start: f64,
     started: bool,
-    /// Init generation per buffer at the moment the init segment was sent.
-    generations: Vec<u32>,
+    /// Init generation per buffer that the player currently knows (what the last announced `moov` held).
+    wire: Vec<u32>,
     /// Per merged track id: fragments starting before this time were already pushed.
     fed_until: HashMap<u32, f64>,
 }
@@ -760,7 +794,7 @@ impl Feeder {
         Self {
             start,
             started: false,
-            generations: Vec::new(),
+            wire: Vec::new(),
             fed_until: HashMap::new(),
         }
     }
@@ -790,15 +824,9 @@ impl Feeder {
         budget: usize,
         ended: bool,
     ) -> FeedAction {
-        if self.started {
-            let changed = buffers.len() != self.generations.len()
-                || buffers
-                    .iter()
-                    .zip(&self.generations)
-                    .any(|(b, g)| b.init_generation != *g);
-            if changed {
-                return FeedAction::Restart;
-            }
+        // A different set of buffers cannot be expressed to a running demuxer; a changed init segment can (see below).
+        if self.started && buffers.len() != self.wire.len() {
+            return FeedAction::Restart;
         }
 
         // Candidate fragments per buffer, in time order, not yet pushed.
@@ -865,19 +893,36 @@ impl Feeder {
             return FeedAction::Idle;
         }
 
+        pending.sort_by(|a, b| a.1.start.total_cmp(&b.1.start).then(a.0.cmp(&b.0)));
         let mut out = Vec::new();
         if !self.started {
-            let Some(init) = combined_init(buffers) else {
+            // Announce, for every buffer, the init of its first fragment to push (its latest one if it has none yet).
+            let mut wire: Vec<u32> = buffers.iter().map(|b| b.init_generation).collect();
+            let mut seen = vec![false; buffers.len()];
+            for (index, fragment) in &pending {
+                if !seen[*index] {
+                    seen[*index] = true;
+                    wire[*index] = fragment.init_generation;
+                }
+            }
+            let Some(init) = combined_init_for(buffers, &wire, true) else {
                 return FeedAction::Idle;
             };
             out = init;
-            self.generations = buffers.iter().map(|b| b.init_generation).collect();
+            self.wire = wire;
             self.started = true;
         }
-        pending.sort_by(|a, b| a.1.start.total_cmp(&b.1.start).then(a.0.cmp(&b.0)));
         for (index, fragment) in pending {
             if out.len() >= budget && !out.is_empty() {
                 break;
+            }
+            // The fragment was appended under another init segment than the one the player has (a quality switch):
+            // announce the new configuration (a bare `moov`, which the demuxer picks up mid-stream) before it.
+            if self.wire[index] != fragment.init_generation {
+                self.wire[index] = fragment.init_generation;
+                if let Some(moov) = combined_init_for(buffers, &self.wire, false) {
+                    out.extend_from_slice(&moov);
+                }
             }
             out.extend_from_slice(&remap_fragment(&fragment.data, index));
             let id = global_track_id(index, fragment.track_id);
@@ -1087,10 +1132,25 @@ mod tests {
         assert_eq!(children(&next, 0, next.len()).len(), 2);
         assert!((feeder.pushed_until() - 5.0).abs() < 1e-9);
 
-        // A different init segment mid-stream means restart.
+        // A different init segment mid-stream is announced inline, before the fragments appended under it.
         video.append(&init(1, b"vide", 90000, 3000)).unwrap();
+        assert_eq!(feeder.poll(&[&video], usize::MAX, false), FeedAction::Idle);
+        video
+            .append(&fragment(1, 5 * 90000, 25, 3000, true))
+            .unwrap();
+        let FeedAction::Push(switched) = feeder.poll(&[&video], usize::MAX, false) else {
+            panic!("expected data");
+        };
+        let kinds: Vec<[u8; 4]> = children(&switched, 0, switched.len())
+            .iter()
+            .map(|c| c.0)
+            .collect();
+        assert_eq!(kinds, vec![*b"moov", *b"moof", *b"mdat"]);
+
+        // A different number of buffers cannot be announced: restart.
+        let audio = SourceBufferState::new();
         assert_eq!(
-            feeder.poll(&[&video], usize::MAX, false),
+            feeder.poll(&[&video, &audio], usize::MAX, false),
             FeedAction::Restart
         );
     }
