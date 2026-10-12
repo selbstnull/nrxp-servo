@@ -11,6 +11,7 @@ extern crate servo_media_traits;
 pub mod audio;
 pub mod context;
 pub mod metadata;
+pub mod mse;
 pub mod video;
 
 use serde::{Deserialize, Serialize};
