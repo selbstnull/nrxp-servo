@@ -195,6 +195,7 @@ impl HTMLMediaElement {
 
     /// The player asked for more data.
     pub(super) fn mse_need_data(&self, cx: &mut JSContext) {
+        debug!("MSE: player needs data");
         if let Some(attachment) = self.mse.borrow_mut().as_mut() {
             attachment.can_push = true;
         }
@@ -256,6 +257,7 @@ impl HTMLMediaElement {
 
     /// Start (or restart) the player at `time` and a fresh feeder.
     fn mse_start_player(&self, cx: &mut JSContext, time: f64) {
+        debug!("MSE: starting the player at {time:.3}");
         let url = match self.mse.borrow().as_ref() {
             Some(attachment) => attachment.url.clone(),
             None => return,
@@ -335,6 +337,7 @@ impl HTMLMediaElement {
             };
             match action {
                 FeedAction::Restart => {
+                    debug!("MSE: restart requested by the feeder");
                     // A different init segment (new resolution, …) or a changed set of buffers: the old stream cannot
                     // continue, begin again from where playback is.
                     let time = self.current_playback_position.get();
@@ -349,6 +352,7 @@ impl HTMLMediaElement {
                     continue;
                 },
                 FeedAction::Push(bytes) => {
+                    debug!("MSE: feeder produced {} bytes", bytes.len());
                     if let Some(attachment) = self.mse.borrow_mut().as_mut() {
                         attachment.outbox.push_back(bytes);
                     }
@@ -391,8 +395,12 @@ impl HTMLMediaElement {
                 None => return,
             };
             match result {
-                Ok(()) => pushed_any = true,
+                Ok(()) => {
+                    pushed_any = true;
+                    debug!("MSE: pushed {} bytes", chunk.len());
+                },
                 Err(PlayerError::EnoughData) => {
+                    debug!("MSE: player has enough data, holding {} bytes", chunk.len());
                     if let Some(attachment) = self.mse.borrow_mut().as_mut() {
                         attachment.outbox.push_front(chunk);
                         attachment.can_push = false;

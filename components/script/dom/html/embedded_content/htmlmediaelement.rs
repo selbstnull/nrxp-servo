@@ -635,6 +635,9 @@ pub(crate) struct HTMLMediaElement {
     newly_introduced_cues: DomRefCell<Vec<Dom<TextTrackCue>>>,
     /// The attached `MediaSource` (Media Source Extensions), if any. See `htmlmediaelement_mse.rs`.
     mse: DomRefCell<Option<mse::MseAttachment>>,
+    /// The player reached Paused/Playing before its metadata was processed (the events are not ordered): the ready state
+    /// upgrade that `playback_state_changed` skipped is done when the metadata arrives.
+    player_ready_before_metadata: Cell<bool>,
 }
 
 /// <https://html.spec.whatwg.org/multipage/#dom-media-networkstate>
@@ -732,6 +735,7 @@ impl HTMLMediaElement {
             position_when_time_marches_on_ran: Default::default(),
             newly_introduced_cues: Default::default(),
             mse: DomRefCell::new(None),
+            player_ready_before_metadata: Cell::new(false),
         }
     }
 
@@ -2522,6 +2526,7 @@ impl HTMLMediaElement {
         // The callback will be the only valid user after this function.
         let shared_player_id = Arc::new(OnceLock::new());
 
+        self.player_ready_before_metadata.set(false);
         let event_handler = Arc::new(Mutex::new(HTMLMediaElementEventHandler::new(self)));
         let weak_event_handler = Arc::downgrade(&event_handler);
         *self.event_handler.borrow_mut() = Some(event_handler);
@@ -3016,6 +3021,13 @@ impl HTMLMediaElement {
         // a change event to be fired.
         // Note that these steps are already handled by the earlier media track processing.
 
+        // The player may have been Paused/Playing already (its events are not ordered with the metadata): catch up.
+        if self.player_ready_before_metadata.replace(false) &&
+            self.ready_state.get() == ReadyState::HaveMetadata
+        {
+            self.change_ready_state(cx, ReadyState::HaveEnoughData);
+        }
+
         let global = self.global();
         let window = global.as_window();
 
@@ -3210,12 +3222,16 @@ impl HTMLMediaElement {
                 media_session_playback_state = MediaSessionPlaybackState::Paused;
                 if self.ready_state.get() == ReadyState::HaveMetadata {
                     self.change_ready_state(cx, ReadyState::HaveEnoughData);
+                } else if self.ready_state.get() == ReadyState::HaveNothing {
+                    self.player_ready_before_metadata.set(true);
                 }
             },
             PlaybackState::Playing => {
                 media_session_playback_state = MediaSessionPlaybackState::Playing;
                 if self.ready_state.get() == ReadyState::HaveMetadata {
                     self.change_ready_state(cx, ReadyState::HaveEnoughData);
+                } else if self.ready_state.get() == ReadyState::HaveNothing {
+                    self.player_ready_before_metadata.set(true);
                 }
             },
             PlaybackState::Buffering => {
@@ -4706,6 +4722,10 @@ impl HTMLMediaElementEventHandler {
         // Abort event processing if the associated media player is outdated.
         if element.player_id().is_none_or(|id| id != player_id) {
             return;
+        }
+
+        if element.mse_active() && !matches!(event, PlayerEvent::PositionChanged(_)) {
+            debug!("MSE: player event {event:?}");
         }
 
         match event {
