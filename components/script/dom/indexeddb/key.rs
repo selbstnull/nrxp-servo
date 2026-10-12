@@ -453,7 +453,9 @@ pub(crate) fn evaluate_key_path_on_value(
         // Step 1. If keyPath is a list of strings, then:
         KeyPath::StringSequence(key_path) => {
             // Step 1.1. Let result be a new Array object created as if by the expression [].
-            rooted!(&in(cx) let mut result = unsafe { JS_NewObject(cx, ptr::null()) });
+            // (An Array, not a plain object: converting the result to a key accepts only arrays — a compound key path
+            // such as ["key", "clientName"] failed with a DataError for every value.)
+            rooted!(&in(cx) let mut result = unsafe { NewArrayObject1(cx.raw_cx(), 0) });
 
             // Step 1.2. Let i be 0.
             // Step 1.3. For each item in keyPath:
@@ -532,8 +534,8 @@ pub(crate) fn evaluate_key_path_on_value(
                 }
 
                 // If value is a Blob and identifier is "size"
-                if identifier == "size" &&
-                    let Ok(blob) = root_from_handlevalue::<Blob>(cx, current_value.handle())
+                if identifier == "size"
+                    && let Ok(blob) = root_from_handlevalue::<Blob>(cx, current_value.handle())
                 {
                     // Let value be a Number equal to value’s size.
                     blob.Size().to_jsval(cx, current_value.handle_mut());
@@ -542,8 +544,8 @@ pub(crate) fn evaluate_key_path_on_value(
                 }
 
                 // If value is a Blob and identifier is "type"
-                if identifier == "type" &&
-                    let Ok(blob) = root_from_handlevalue::<Blob>(cx, current_value.handle())
+                if identifier == "type"
+                    && let Ok(blob) = root_from_handlevalue::<Blob>(cx, current_value.handle())
                 {
                     // Let value be a String equal to value’s type.
                     blob.Type().to_jsval(cx, current_value.handle_mut());
@@ -552,8 +554,8 @@ pub(crate) fn evaluate_key_path_on_value(
                 }
 
                 // If value is a File and identifier is "name"
-                if identifier == "name" &&
-                    let Ok(file) = root_from_handlevalue::<File>(cx, current_value.handle())
+                if identifier == "name"
+                    && let Ok(file) = root_from_handlevalue::<File>(cx, current_value.handle())
                 {
                     // Let value be a String equal to value’s name.
                     file.name().to_jsval(cx, current_value.handle_mut());
@@ -562,8 +564,8 @@ pub(crate) fn evaluate_key_path_on_value(
                 }
 
                 // If value is a File and identifier is "lastModified"
-                if identifier == "lastModified" &&
-                    let Ok(file) = root_from_handlevalue::<File>(cx, current_value.handle())
+                if identifier == "lastModified"
+                    && let Ok(file) = root_from_handlevalue::<File>(cx, current_value.handle())
                 {
                     // Let value be a Number equal to value’s lastModified.
                     file.LastModified().to_jsval(cx, current_value.handle_mut());
@@ -572,8 +574,8 @@ pub(crate) fn evaluate_key_path_on_value(
                 }
 
                 // If value is a File and identifier is "lastModifiedDate"
-                if identifier == "lastModifiedDate" &&
-                    let Ok(file) = root_from_handlevalue::<File>(cx, current_value.handle())
+                if identifier == "lastModifiedDate"
+                    && let Ok(file) = root_from_handlevalue::<File>(cx, current_value.handle())
                 {
                     // Let value be a new Date object with [[DateValue]] internal slot equal to value’s lastModified.
                     let time = ClippedTime {
